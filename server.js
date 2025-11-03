@@ -1,43 +1,42 @@
 import express from "express";
 import crypto from "crypto";
-import dotenv from "dotenv";
-import { Pool } from "pg";
-
-dotenv.config();
 
 const app = express();
 app.use(express.json());
 
-// PNG 1x1 transparent pixel
+// Transparent 1x1 pixel
 const PIXEL = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=",
   "base64"
 );
 
-const HMAC_SECRET = process.env.HMAC_SECRET || "dev-secret";
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
-});
+const HMAC_SECRET = "dev-secret"; // optional: replace with env variable
 
-// HMAC signature helper
+// In-memory storage
+const redirectMap = new Map(); // token -> URL
+const events = []; // stores last events
+
+// HMAC helper
 function sign(...parts) {
   const h = crypto.createHmac("sha256", HMAC_SECRET);
   h.update(parts.join("|"));
   return h.digest("hex");
 }
 
-// Pixel endpoint
-app.get("/s/pixel", async (req, res) => {
+// Pixel tracking endpoint
+app.get("/s/pixel", (req, res) => {
   const { tid, mid, sig } = req.query;
   if (!tid || !mid || !sig) return res.status(400).send("Missing parameters");
-  const expectedSig = sign(tid, mid);
-  if (sig !== expectedSig) return res.status(400).send("Invalid signature");
 
-  await pool.query(
-    "INSERT INTO events(type, tid, mid, ip) VALUES($1,$2,$3,$4)",
-    ["OPEN", tid, mid, req.ip]
-  );
+  if (sig !== sign(tid, mid)) return res.status(400).send("Invalid signature");
+
+  events.push({
+    type: "OPEN",
+    tid,
+    mid,
+    ip: req.ip,
+    timestamp: new Date()
+  });
 
   res.set({
     "Content-Type": "image/png",
@@ -50,43 +49,43 @@ app.get("/s/pixel", async (req, res) => {
 });
 
 // Redirect endpoint
-app.get("/r/:token", async (req, res) => {
+app.get("/r/:token", (req, res) => {
   const token = req.params.token;
-  const result = await pool.query("SELECT url FROM redirects WHERE token=$1", [token]);
-  if (!result.rows[0]) return res.status(404).send("Unknown link");
+  const url = redirectMap.get(token);
+  if (!url) return res.status(404).send("Unknown link");
 
-  await pool.query(
-    "INSERT INTO events(type, token, url, ip) VALUES($1,$2,$3,$4)",
-    ["CLICK", token, result.rows[0].url, req.ip]
-  );
+  events.push({
+    type: "CLICK",
+    token,
+    url,
+    ip: req.ip,
+    timestamp: new Date()
+  });
 
-  res.redirect(302, result.rows[0].url);
+  res.redirect(302, url);
 });
 
 // Create tokenized redirect
-app.post("/api/createLink", async (req, res) => {
+app.post("/api/createLink", (req, res) => {
   const { url } = req.body;
   if (!url) return res.status(400).send("Missing url");
+
   const token = crypto.randomBytes(4).toString("hex");
-  await pool.query("INSERT INTO redirects(token, url) VALUES($1,$2)", [token, url]);
+  redirectMap.set(token, url);
   res.json({ token });
 });
 
-// Stats for a specific tid
-app.get("/api/stats/:tid", async (req, res) => {
+// Stats endpoint
+app.get("/api/stats/:tid", (req, res) => {
   const { tid } = req.params;
-  const result = await pool.query(
-    "SELECT type, COUNT(*) as count FROM events WHERE tid=$1 GROUP BY type",
-    [tid]
-  );
-  const stats = {};
-  result.rows.forEach(r => stats[r.type] = parseInt(r.count));
+  const filtered = events.filter(ev => ev.tid === tid);
+  const stats = { OPEN: 0, CLICK: 0 };
+  filtered.forEach(ev => { stats[ev.type] = (stats[ev.type] || 0) + 1 });
   res.json({ tid, stats });
 });
 
 // Dashboard
-app.get("/dashboard", async (req, res) => {
-  const result = await pool.query("SELECT * FROM events ORDER BY created_at DESC LIMIT 100");
+app.get("/dashboard", (req, res) => {
   let html = `<html><head><title>Dashboard</title>
     <style>
       body { font-family: Arial; margin: 20px; }
@@ -96,13 +95,13 @@ app.get("/dashboard", async (req, res) => {
     </style></head><body>`;
   html += "<h1>Email Tracker Dashboard</h1>";
   html += "<table><tr><th>Type</th><th>tid/mid</th><th>Token</th><th>URL</th><th>Timestamp</th><th>IP</th></tr>";
-  result.rows.forEach(ev => {
+  events.slice(-100).forEach(ev => {
     html += `<tr>
       <td>${ev.type}</td>
       <td>${ev.tid || ev.mid || ""}</td>
       <td>${ev.token || ""}</td>
       <td>${ev.url || ""}</td>
-      <td>${new Date(ev.created_at).toLocaleString()}</td>
+      <td>${ev.timestamp.toLocaleString()}</td>
       <td>${ev.ip}</td>
     </tr>`;
   });
@@ -111,4 +110,4 @@ app.get("/dashboard", async (req, res) => {
 });
 
 const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`Server listening on ${port}`));
+app.listen(port, () => console.log(`Server listening on port ${port}`));
