@@ -48,16 +48,20 @@ app.get("/s/pixel", (req, res) => {
   res.send(PIXEL);
 });
 
-// Redirect endpoint
+// Redirect endpoint (fixed to include tid/mid)
 app.get("/r/:token", (req, res) => {
   const token = req.params.token;
   const url = redirectMap.get(token);
   if (!url) return res.status(404).send("Unknown link");
 
+  const { tid, mid } = req.query; // include tid/mid from tracked link
+
   events.push({
     type: "CLICK",
     token,
     url,
+    tid: tid || null,
+    mid: mid || null,
     ip: req.ip,
     timestamp: new Date()
   });
@@ -94,11 +98,12 @@ app.get("/dashboard", (req, res) => {
       th { background-color: #eee; }
     </style></head><body>`;
   html += "<h1>Email Tracker Dashboard</h1>";
-  html += "<table><tr><th>Type</th><th>tid/mid</th><th>Token</th><th>URL</th><th>Timestamp</th><th>IP</th></tr>";
+  html += "<table><tr><th>Type</th><th>tid</th><th>mid</th><th>Token</th><th>URL</th><th>Timestamp</th><th>IP</th></tr>";
   events.slice(-100).forEach(ev => {
     html += `<tr>
       <td>${ev.type}</td>
-      <td>${ev.tid || ev.mid || ""}</td>
+      <td>${ev.tid || ""}</td>
+      <td>${ev.mid || ""}</td>
       <td>${ev.token || ""}</td>
       <td>${ev.url || ""}</td>
       <td>${ev.timestamp.toLocaleString()}</td>
